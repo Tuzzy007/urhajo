@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Űrhajó</title>
+<style>
+html,body{height:100%;margin:0;background:#071024;color:#dfeffb;font-family:Inter,Segoe UI,Roboto,Arial}
+#game{display:block;background:#000;border:6px solid #071024;box-shadow:0 8px 30px rgba(0,0,0,.7);margin:10px auto;}
+.ui{width:900px;margin:0 auto;display:flex;justify-content:space-between;align-items:center}
+button{background:#0b3b5a;border:0;color:#fff;padding:.5rem 1rem;border-radius:8px;cursor:pointer;transition:0.2s;}
+button[data-upg]:hover{box-shadow:0 0 10px #6fe; transform:scale(1.05);}
+#overlay{width:900px;margin:6px auto;color:#9fd3ff}
+.stat{display:inline-block;margin-right:12px}
+#upgradePanel{position:fixed;right:20px;top:20px;background:rgba(2,8,20,.95);padding:12px;border-radius:10px;border:1px solid #123;color:#cfe}
+</style>
+</head>
+<body>
+
+<div class="ui">
+  <div>
+    <span class="stat">Pont: <span id="score">0</span></span>
+    <span class="stat">Életek: <span id="lives">3</span></span>
+    <span class="stat">Pajzs: <span id="shield">0</span></span>
+    <span class="stat">Pénz: <span id="money">0</span></span>
+    <button id="persistUpgrades" style="margin-left:20px">Fejlesztések megmaradása újrakezdés után: KI</button>
+  </div>
+  <div>
+    <button id="toggleUpgrades">Upgrade</button>
+    <button id="restart">Újrakezd</button>
+  </div>
+</div>
+
+<canvas id="game" width="900" height="600"></canvas>
+<div id="overlay">
+  Használat: nyilak vagy WASD a mozgatáshoz, Szóköz a lövéshez, H a homing lövedékhez, P a megállításhoz.<br>
+  Nyomd az <strong>Upgrade</strong> gombot a fejlesztésekhez.
+</div>
+
+<div id="upgradePanel" style="display:none">
+<h3>Fejlesztések</h3>
+<div>Szint: <span id="shipLevel">1</span></div>
+<div style="margin-top:8px">
+  <div>1) Tűzgyorsaság (+1 lövés/mp) — Ár: <span id="priceRate">50</span> <button data-upg="rate">Vásárlás</button></div>
+  <div>2) Sebesség (+0.5) — Ár: <span id="priceSpeed">40</span> <button data-upg="speed">Vásárlás</button></div>
+  <div>3) Lövedék sebzés (+1) — Ár: <span id="priceDamage">60</span> <button data-upg="damage">Vásárlás</button></div>
+  <div>4) Homing lövedék — Szint: <span id="homingLevel">0</span> Ár: <span id="priceHoming">100</span> <button data-upg="homing">Vásárlás</button></div>
+  <div style="margin-top:8px">Vásárlások száma: <span id="upgradesCount">0</span></div>
+</div>
+</div>
+
+<script>
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const W=canvas.width,H=canvas.height;
+let paused=false;
+
+const scoreEl=document.getElementById('score');
+const livesEl=document.getElementById('lives');
+const shieldEl=document.getElementById('shield');
+const moneyEl=document.getElementById('money');
+const upgradePanel=document.getElementById('upgradePanel');
+const toggleUpgrades=document.getElementById('toggleUpgrades');
+const restartBtn=document.getElementById('restart');
+const shipLevelEl=document.getElementById('shipLevel');
+const upgradesCountEl=document.getElementById('upgradesCount');
+const persistBtn=document.getElementById('persistUpgrades');
+
+let keys={}, score=0, money=0, lives=3, shield=0, gameOver=false;
+let persistUpgrades=false;
+let shieldActive=false, shieldTime=0;
+
+persistBtn.addEventListener('click',()=>{
+  persistUpgrades=!persistUpgrades;
+  persistBtn.textContent=`Fejlesztések újrakezdés után: ${persistUpgrades?'BE':'KI'}`;
+});
+
+const ship={x:W/2,y:H-80,w:40,h:40,speed:3.2,fireRate:3,damage:1,lastShot:0,upgrades:0};
+let priceRate=50, priceSpeed=40, priceDamage=60;
+let bullets=[], enemies=[], enemyBullets=[], pickups=[], particles=[], popups=[];
+let lastTime=0;
+ship.homingLevel=0;
+let priceHoming=500;
+const homingAccuracy=[0,0.1,0.2,0.3];
+let homingShots=[];
+const HOMING_LIMIT=15, HOMING_WINDOW=30000;
+
+const rand=(a,b)=>Math.random()*(b-a)+a;
+const stars=Array.from({length:100},()=>({x:rand(0,W),y:rand(0,H),size:rand(1,2),speed:rand(0.2,0.7)}));
+
+window.addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;});
+window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+document.addEventListener('keydown',e=>{if(e.code==='KeyP'){paused=!paused;if(!paused) lastTime=performance.now();}});
+
+toggleUpgrades.addEventListener('click',()=>{upgradePanel.style.display=upgradePanel.style.display==='none'?'block':'none';});
+restartBtn.addEventListener('click',resetGame);
+
+upgradePanel.addEventListener('click',e=>{
+  if(!e.target.dataset.upg) return;
+  const t=e.target.dataset.upg;
+  if(t==='rate'&&money>=priceRate){money-=priceRate;ship.fireRate+=1;ship.upgrades++;priceRate=Math.floor(priceRate*1.6);}
+  if(t==='speed'&&money>=priceSpeed){money-=priceSpeed;ship.speed+=0.5;ship.upgrades++;priceSpeed=Math.floor(priceSpeed*1.5);}
+  if(t==='damage'&&money>=priceDamage){money-=priceDamage;ship.damage+=1;ship.upgrades++;priceDamage=Math.floor(priceDamage*1.7);}
+  if(t==='homing'&&money>=priceHoming&&ship.homingLevel<3){money-=priceHoming;ship.homingLevel++;ship.upgrades++;priceHoming=Math.floor(priceHoming*1.8);}
+  updateUI();
+});
+
+function resetGame(){
+  score=0; money=50000; lives=3; shield=0;
+  ship.x=W/2; ship.y=H-80;
+  if(!persistUpgrades){ship.speed=3.2;ship.fireRate=3;ship.damage=1;ship.upgrades=0;priceRate=50;priceSpeed=40;priceDamage=60;}
+  bullets=[]; enemies=[]; enemyBullets=[]; pickups=[]; particles=[]; popups=[];
+  gameOver=false;
+  updateUI();
+  requestAnimationFrame(loop);
+}
+
+function updateUI(){
+  scoreEl.textContent=Math.floor(score);
+  livesEl.textContent=lives;
+  shieldEl.textContent=shield;
+  moneyEl.textContent=money;
+  shipLevelEl.textContent=Math.max(1,1+Math.floor(ship.upgrades/3));
+  upgradesCountEl.textContent=ship.upgrades;
+  document.getElementById('priceRate').textContent=priceRate;
+  document.getElementById('priceSpeed').textContent=priceSpeed;
+  document.getElementById('priceDamage').textContent=priceDamage;
+  document.getElementById('priceHoming').textContent=priceHoming;
+  document.getElementById('homingLevel').textContent=ship.homingLevel;
+}
+
+function spawnEnemy(){
+  const size=Math.floor(rand(18,36));
+  const dirX=(Math.random()<0.5?-1:1)*rand(0.3,1);
+  enemies.push({x:rand(size,W-size),y:-size,w:size,h:size,spd:rand(0.5,1.2)+ship.upgrades*0.05,shotTimer:rand(1.2,3),dirX});
+}
+
+function spawnPickup(x,y){
+  const t=Math.random();
+  pickups.push({x,y,type:t<0.5?'shield':'money',amt:t<0.5?0:10+Math.floor(Math.random()*30)});
+}
+
+function spawnParticles(x,y,color,count=10){
+  for(let i=0;i<count;i++){particles.push({x,y,vx:rand(-2,2),vy:rand(-2,2),life:rand(0.3,0.7),color});}
+}
+
+function spawnPopup(x,y,text,color='#fff',life=0.8){popups.push({x,y,text,color,life});}
+function rectColl(a,b){return a&&b&&a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
+
+function update(dt){
+  if(gameOver) return;
+  if(Math.random()<dt*0.6) spawnEnemy();
+
+  if((keys['arrowleft']||keys['a'])&&ship.x>10) ship.x-=ship.speed*dt*60;
+  if((keys['arrowright']||keys['d'])&&ship.x<W-ship.w-10) ship.x+=ship.speed*dt*60;
+  if((keys['arrowup']||keys['w'])&&ship.y>10) ship.y-=ship.speed*dt*60;
+  if((keys['arrowdown']||keys['s'])&&ship.y<H-ship.h-10) ship.y+=ship.speed*dt*60;
+
+  if(shieldActive){
+      shieldTime -= dt;
+      if(shieldTime <= 0){
+          shieldActive = false;
+          shieldTime = 0;
+      }
+  }
+  
+  if(!shieldActive && shield > 0){
+      shield--;
+      shieldActive = true;
+      shieldTime = 15;
+      spawnPopup(ship.x+ship.w/2, ship.y, '+1 Shield újraaktiválva', '#6fe');
+  }
+
+
+  if(keys[' ']&&(performance.now()-ship.lastShot)>1000/ship.fireRate){
+    bullets.push({x:ship.x+ship.w/2-4,y:ship.y-8,w:8,h:14,spd:10,damage:ship.damage,created:performance.now(),angle:-Math.PI/2});
+    ship.lastShot=performance.now();
+  }
+
+  if(keys['h']&&ship.homingLevel>0){
+    const now=performance.now();
+    if(!ship.lastHomingShot||now-ship.lastHomingShot>1000/ship.fireRate){
+      homingShots=homingShots.filter(t=>now-t<HOMING_WINDOW);
+      if(homingShots.length<HOMING_LIMIT){
+        bullets.push({x:ship.x+ship.w/2-6,y:ship.y-12,w:12,h:18,spd:10,damage:ship.damage,created:now,angle:-Math.PI/2,homing:true});
+        homingShots.push(now);
+        ship.lastHomingShot=now;
+      }
+    }
+  }
+
+  bullets.forEach(b=>{
+    if(!b) return;
+
+    if(performance.now()-b.created>5000){
+      spawnParticles(b.x+b.w/2,b.y+b.h/2,'#ff0',20);
+      const radius=50;
+      enemies.forEach((e,ei)=>{
+        if(!e) return;
+        const dx=(e.x+e.w/2)-(b.x+b.w/2);
+        const dy=(e.y+e.h/2)-(b.y+b.h/2);
+        if(Math.sqrt(dx*dx+dy*dy)<=radius){
+          e.h-=b.damage*2;
+          spawnParticles(e.x+e.w/2,e.y+e.h/2,'#f55',10);
+          if(e.h<=10){
+            if(Math.random()<0.35)spawnPickup(e.x+e.w/2,e.y+e.h/2);
+            score+=10; money+=8; spawnPopup(e.x,e.y,'+8','yellow');
+            enemies[ei]=null;
+          }
+        }
+      });
+      bullets[bullets.indexOf(b)]=null;
+      return;
+    }
+
+    if(b.homing&&ship.homingLevel>0){
+      let closest=null,dist=Infinity;
+      enemies.forEach(e=>{
+        if(!e) return;
+        const dx=(e.x+e.w/2)-(b.x+b.w/2);
+        const dy=(e.y+e.h/2)-(b.y+b.h/2);
+        const d=Math.sqrt(dx*dx+dy*dy);
+        if(d<dist){dist=d;closest=e;}
+      });
+
+      if(closest){
+        const dx=(closest.x+closest.w/2)-(b.x+b.w/2);
+        const dy=(closest.y+closest.h/2)-(b.y+b.h/2);
+        const angle=Math.atan2(dy,dx);
+        if(b.angle===undefined)b.angle=-Math.PI/2;
+        const accuracy=homingAccuracy[ship.homingLevel];
+        const turnSpeed=0.2*accuracy;
+        let delta=angle-b.angle;
+        delta=((delta+Math.PI)%(2*Math.PI))-Math.PI;
+        b.angle+=delta*turnSpeed;
+        b.x+=Math.cos(b.angle)*b.spd*dt*60;
+        b.y+=Math.sin(b.angle)*b.spd*dt*60;
+      }else{
+        b.y-=b.spd*dt*60;
+      }
+    }else{
+      b.y-=b.spd*dt*60;
+    }
+
+    if(!b.lastParticleY)b.lastParticleY=b.y;
+    if(Math.abs(b.y-b.lastParticleY)>10){
+      spawnParticles(b.x+b.w/2,b.y,'#ffb86b',1);
+      b.lastParticleY=b.y;
+    }
+  });
+
+  bullets=bullets.filter(b=>b);
+
+  enemies.forEach(en=>{
+    if(!en) return;
+    en.y+=en.spd*dt*60;
+    en.x+=en.dirX*en.spd*dt*60;
+    if(en.x<0){en.x=0;en.dirX*=-1;}
+    if(en.x+en.w>W){en.x=W-en.w;en.dirX*=-1;}
+    en.shotTimer-=dt;
+    if(en.shotTimer<=0){
+      enemyBullets.push({x:en.x+en.w/2-3,y:en.y+en.h,w:6,h:10,spd:4+Math.random()*1.6});
+      en.shotTimer=1+Math.random()*1.5;
+    }
+  });
+  enemies=enemies.filter(e=>e&&e.y<H+100);
+
+  enemyBullets.forEach(b=>{
+    if(!b) return;
+    b.y+=b.spd*dt*60;
+    if(!b.lastParticleY)b.lastParticleY=b.y;
+    if(Math.abs(b.y-b.lastParticleY)>10){
+      spawnParticles(b.x+b.w/2,b.y,'#ffd1d1',1);
+      b.lastParticleY=b.y;
+    }
+  });
+  enemyBullets=enemyBullets.filter(b=>b&&b.y<H+50);
+
+  enemyBullets.forEach((b,bi)=>{
+    if(!b) return;
+    if(rectColl(b,ship)){
+      enemyBullets[bi]=null;
+      if(shield>0){shield--;shieldActive=shield>0;}
+      else{lives--;if(lives<=0)gameOver=true;}
+    }
+  });
+
+  enemies.forEach((e,ei)=>{
+    if(!e) return;
+    if(rectColl(e,ship)){
+      if(shield>0){shield--;shieldActive=shield>0;}
+      else{lives--;if(lives<=0)gameOver=true;}
+      enemies[ei]=null;
+    }
+  });
+
+  bullets.forEach((b,bi)=>{
+    if(!b) return;
+    enemies.forEach((e,ei)=>{
+      if(!e) return;
+      if(rectColl(b,e)){
+        bullets[bi]=null;
+        e.h-=10;
+        spawnParticles(e.x+e.w/2,e.y+e.h/2,'#f55',5);
+        if(e.h<=10){
+          if(Math.random()<0.35)spawnPickup(e.x+e.w/2,e.y+e.h/2);
+          score+=10; money+=8; spawnPopup(e.x,e.y,'+8','yellow');
+          enemies[ei]=null;
+          spawnParticles(e.x+e.w/2,e.y+e.h/2,'#ff0',15);
+        }
+      }
+    });
+  });
+
+  bullets=bullets.filter(b=>b);
+  enemies=enemies.filter(e=>e);
+
+  pickups.forEach((p,pi)=>{
+    if(!p) return;
+    const rect={x:p.x-10,y:p.y-10,w:20,h:20};
+    if(rectColl(rect,ship)){
+      if(p.type==='shield'){
+        shield++; shieldActive=true; shieldTime=15;
+        spawnPopup(p.x,p.y,'+1 Shield','#6fe');
+      }else if(p.type==='money'){
+        money+=p.amt;
+        spawnPopup(p.x,p.y,'+'+p.amt,'yellow');
+      }
+      pickups[pi]=null;
+    }
+  });
+  pickups=pickups.filter(p=>p);
+
+  particles.forEach(p=>{if(!p)return;p.x+=p.vx*dt*60;p.y+=p.vy*dt*60;p.life-=dt;});
+  particles=particles.filter(p=>p&&p.life>0);
+  popups.forEach(p=>{if(!p)return;p.y-=dt*30;p.life-=dt;});
+  popups=popups.filter(p=>p&&p.life>0);
+  score+=dt*1.3;
+  updateUI();
+}
+
+function draw() {
+  // Háttér
+  ctx.fillStyle = '#00101a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Csillagok
+  stars.forEach(s => {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillRect(s.x, s.y, s.size, s.size);
+    s.y += s.speed;
+    if(s.y > H) s.y = 0;
+  });
+
+  // Hajó és pajzs
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+
+  // Hajó
+  ctx.fillStyle = '#88f';
+  ctx.beginPath();
+  ctx.moveTo(ship.w/2, 0);
+  ctx.lineTo(ship.w, ship.h);
+  ctx.lineTo(0, ship.h);
+  ctx.closePath();
+  ctx.fill();
+
+  // Pajzs
+  if(shieldActive){
+    const alpha = Math.max(0.2, shieldTime / 15); // átlátszóság a shieldTime alapján
+    ctx.strokeStyle = `rgba(0,200,255,${alpha})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(ship.w/2, ship.h/2, ship.w * 1.3, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Lövedékek (nullbiztos)
+  bullets.filter(b => b).forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+
+  // Ellenségek (nullbiztos)
+  enemies.filter(e => e).forEach(e => {
+    ctx.fillStyle = '#f55';
+    ctx.fillRect(e.x, e.y, e.w, e.h);
+    // Életerő sáv
+    ctx.fillStyle = '#222';
+    ctx.fillRect(e.x, e.y - 6, e.w, 4);
+    ctx.fillStyle = '#7f7';
+    ctx.fillRect(e.x, e.y - 6, Math.max(0, (e.h/36)*e.w), 4);
+  });
+
+  // Ellenség lövedékek (nullbiztos)
+  enemyBullets.filter(b => b).forEach(b => ctx.fillRect(b.x, b.y, 6, 10));
+
+  // Pickupok (nullbiztos)
+  pickups.filter(p => p).forEach(p => {
+    if(p.type === 'shield'){
+      ctx.fillStyle = '#6fe';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 10, 0, Math.PI*2);
+      ctx.fill();
+    } else if(p.type === 'money'){
+      ctx.fillStyle = 'yellow';
+      ctx.fillRect(p.x - 8, p.y - 8, 16, 16);
+    }
+  });
+
+  // Részecskék (nullbiztos)
+  particles.filter(p => p).forEach(p => {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 2, 2);
+  });
+
+  // Pop-up szövegek (nullbiztos)
+  popups.filter(p => p).forEach(p => {
+    ctx.fillStyle = p.color;
+    ctx.font = '16px sans-serif';
+    ctx.fillText(p.text, p.x, p.y);
+  });
+
+  // Pajzs idő szöveg (képernyő bal felső sarka)
+  if(shieldActive){
+    ctx.font = '16px Arial';
+    ctx.fillStyle = '#0ff';
+    ctx.fillText(`Shield: ${shieldTime.toFixed(1)}s`, 10, 30);
+  }
+
+  // Game Over overlay
+  if(gameOver){
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.font = '36px sans-serif';
+    ctx.fillText('Vesztettél!', 160, H/2);
+  }
+}
+
+
+function loop(ts){
+    if(paused){
+        draw();
+        ctx.fillStyle='rgba(0,0,0,0.5)';
+        ctx.fillRect(0,0,W,H);
+        ctx.fillStyle='#fff';
+        ctx.font='bold 48px Arial';
+        ctx.fillText('PAUSE', W/2-90, H/2);
+        requestAnimationFrame(loop);
+        return;
+    }
+
+    if(!lastTime) lastTime = ts;
+    const dt = Math.min(0.05,(ts-lastTime)/1000);
+    update(dt);
+    draw();
+    lastTime = ts;
+    if(!gameOver) requestAnimationFrame(loop);
+}
+
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+
+</body>
+</html>
