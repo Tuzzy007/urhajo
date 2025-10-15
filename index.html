@@ -312,7 +312,7 @@ function spawnEnemy(){
   const size = Math.floor(rand(18,36));
   const dirX = (Math.random()<0.5?-1:1) * rand(0.3,1);
   const baseHp = 20;
-  const hp = baseHp + ship.upgrades * 2;
+  const hp = baseHp + ship.upgrades * 4;
   enemies.push({x:rand(size,W-size),y:-size,w:size,h:size,spd:rand(0.5,1.2)+ship.upgrades*0.05,shotTimer:rand(1.2,3),dirX,h:size,hp});
 }
 
@@ -772,4 +772,5 @@ requestAnimationFrame(loop);
 
 </body>
 </html>
+
 
